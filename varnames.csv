@@ -1,0 +1,36 @@
+start instant
+end instant
+baseline value (medical expert)
+baseline value (SisPorto)
+accelerations (SisPorto)
+foetal movement (SisPorto)
+uterine contractions (SisPorto)
+percentage of time with abnormal short term variability  (SisPorto)
+mean value of short term variability  (SisPorto)
+percentage of time with abnormal long term variability  (SisPorto)
+mean value of long term variability  (SisPorto)
+light decelerations
+severe decelerations
+prolongued decelerations
+repetitive decelerations
+histogram width
+low freq. of the histogram
+high freq. of the histogram
+number of histogram peaks
+number of histogram zeros
+histogram mode
+histogram mean
+histogram median
+histogram variance
+"histogram tendency: -1=left assymetric; 0=symmetric; 1=right assymetric"
+calm sleep
+REM sleep
+calm vigilance
+active vigilance
+shift pattern (A or Susp with shifts)
+accelerative/decelerative pattern (stress situation)
+decelerative pattern (vagal stimulation)
+largely decelerative pattern
+flat-sinusoidal pattern (pathological state)
+suspect pattern
+"Normal=1; Suspect=2; Pathologic=3"
