@@ -67,7 +67,7 @@ df['status'] = np.where(df.NSP == 1, 0, 1)
 df = df.sample(frac=1, random_state=0)  # fix seed to make results reproducible
 
 # make vector of class labels and feature matrix
-y, X = df.status.values, df.drop(columns=['NSP', 'status']).values
+y, X = df.status.values, df.drop(columns=['NSP', 'status']).values.astype('float')
 
 ##############################################################################################################
 # Feature engineering
@@ -92,23 +92,16 @@ def lof_outlier_removal(X, share_out=10**(-20)):
 # Make lof outlier_removal a transformer function
 lof_outlier_removal = sklearn.preprocessing.FunctionTransformer(lof_outlier_removal)
 
+
 def zscore_outlier_removal(X, threshold=5):
     """ Sets feature values in X that are more than threshold times standard deviation away from their mean
     to NaN. Returns X with original length but some column values are NaN.
     """
-    for col in range(len(X[0])):
-        mean = np.mean(X[:,col])
-        std = pd.DataFrame(X[:,col]).std().values
-        X_scale = (X[:,col]-mean)/(std+1)
-        for row in range(len(X)):
-            if abs(X_scale[row]) > threshold:
-                X[row,col] = np.nan
+    new_X = copy.deepcopy(X)
 
-    return X
+    new_X[abs (sklearn.preprocessing.scale (X)) > threshold] = np.nan
 
-Z = [[0,1,2],[1,1,1],[3,2,3]]
-sklearn.preprocessing.scale(Z)
-Z
+    return new_X
 
 # Make zscore feature outlier removal a transformer function
 zscore_outlier_removal = sklearn.preprocessing.FunctionTransformer(zscore_outlier_removal,
@@ -118,15 +111,14 @@ zscore_outlier_removal = sklearn.preprocessing.FunctionTransformer(zscore_outlie
 KNN_impute = KNNImputer()
 
 # add feature polynomials up to degree d
-poly = sklearn.preprocessing.PolynomialFeatures(degree=2, interaction_only=False,
-                                                include_bias=False)
+poly = sklearn.preprocessing.PolynomialFeatures(degree=2, interaction_only=False, include_bias=False)
 
 # demean and scale to unit variance
 scale = sklearn.preprocessing.StandardScaler()
 
 # Put all processing and feature engineering in a pipeline 
 processing = imblearn.pipeline.Pipeline([('outlier', zscore_outlier_removal), ('impute', KNN_impute),
-                                         ('poly', poly), ('scale', scale)], verbose=True)
+                                         ('poly', poly), ('scale', scale)], verbose=False)
 
 ##############################################################################################################
 # Functions
@@ -168,21 +160,54 @@ log_reg_cv = sklearn.linear_model.LogisticRegressionCV(Cs=10, fit_intercept=True
 
 log_reg = sklearn.linear_model.LogisticRegression(fit_intercept=True, dual=False, C=0.3, l1_ratio=0.9,
                                                    penalty='elasticnet', solver='saga', tol=0.0001,
-                                                   max_iter=10000, class_weight=None, n_jobs=1, verbose=0)
+                                                   max_iter=10000, class_weight=None, n_jobs=1,
+                                                  verbose=0)
 
 log = copy.deepcopy(processing)
 log.steps.append(['log_reg', log_reg])
 
-param_grid = {"outlier__kw_args": [dict(threshold=i) for i in [100, 7, 5, 3]],
-              "poly__degree": [1, 2],
-              "log_reg__C": [np.e**i for i in range(-4,5,1)],
-              "log_reg__l1_ratio": [0,0.2,0.5,0.9,0.99,1]}
+param_grid = {"outlier__kw_args": [dict(threshold=i) for i in [100]],
+              "poly__degree": [2],
+              "log_reg__C": [np.e],
+              "log_reg__l1_ratio": [0.99],
+              "log_reg__class_weight": [{0: x, 1: 1-x} for x in np.linspace(0,1,11)]}
 
-cv = sklearn.model_selection.GridSearchCV(log, param_grid, scoring='balanced_accuracy', n_jobs=-1,
-                                                    refit=True, cv=k_fold_strat_oversamp(X, y, k=10),
-                                                    verbose=0)
+# weights to try
+weights = np.linspace(0,1,11)
+weight_grid = {"log_reg__class_weight": [{0: x, 1: 1-x} for x in weights]}
 
+# penalty values to try
+c_vals = np.linspace(0.5,5,11)
+c_vals = [np.exp(i) for i in np.linspace(-3,3,10)]
+c_grid = {"log_reg__C": c_vals}
+
+cv = sklearn.model_selection.GridSearchCV(log, c_grid, scoring='balanced_accuracy', n_jobs=6,
+                                                    refit=True, verbose=True, return_train_score=True)
 cv.fit(X,y)
+
+# cv.best_score_
+# cv.best_params_
+# cv.cv_results_
+
+cv_results = pd.DataFrame(cv.cv_results_)
+
+# Plot penalty values vs balanced accuracy score
+plt.plot(np.log(c_vals), cv_results.mean_test_score, color="black")
+plt.fill_between(c_vals, cv_results.mean_test_score+cv_results.std_test_score,
+                 cv_results.mean_test_score-cv_results.std_test_score, color="gray")
+
+plt.plot(np.log(c_vals), cv_results.mean_train_score, color="blue")
+plt.fill_between(c_vals, cv_results.mean_train_score+cv_results.std_train_score,
+                 cv_results.mean_train_score-cv_results.std_train_score, color="gray")
+plt.show()
+
+# Plot weights vs balanced accuracy score
+# plt.plot(weights, weight_score.mean_score, color="black")
+# plt.fill_between(weights, weight_score.mean_score+weight_score.std_score,
+#                  weight_score.mean_score-weight_score.std_score, color="gray")
+# plt.show()
+
+
 # log_reg_cv.fit(X,y)
 # log_reg_cv.scores_
 # log_reg_cv.l1_ratio_
