@@ -15,6 +15,7 @@ import sklearn
 import imblearn
 import copy
 import scipy
+from sklearn.impute import KNNImputer
 
 ##############################################################################################################
 # Data
@@ -76,6 +77,7 @@ def lof_outlier_removal(X, share_out=10**(-20)):
     """ Removes outliers from X using local outlier factors. Number of removed
     outliers based on share_out (= prior on / desired share of outliers). len(X_transform)<len(X_original)
     """
+    new_X = copy.deepcopy(X)
     lof = sklearn.neighbors.LocalOutlierFactor(n_neighbors=50, algorithm='auto',
                                                leaf_size=30, metric='minkowski', p=2, metric_params=None,
                                                contamination=share_out, novelty=False, n_jobs=None)
@@ -83,47 +85,48 @@ def lof_outlier_removal(X, share_out=10**(-20)):
     outliers = lof.fit_predict(X)
     outlier_indices = [i for i in range(len(X)) if outliers[i] == -1]
     for outlier in outlier_indices:
-        X = np.delete(X, outlier, axis=0)
+        new_X = np.delete(X, outlier, axis=0)
 
-    return X
+    return new_X
 
 # Make lof outlier_removal a transformer function
 lof_outlier_removal = sklearn.preprocessing.FunctionTransformer(lof_outlier_removal)
 
-def zscore_outlier_removal(X, threshold):
+def zscore_outlier_removal(X, threshold=5):
     """ Sets feature values in X that are more than threshold times standard deviation away from their mean
     to NaN. Returns X with original length but some column values are NaN.
     """
     for col in range(len(X[0])):
         mean = np.mean(X[:,col])
         std = pd.DataFrame(X[:,col]).std().values
-        print(std)
-        X_scale = (X[:,col]-mean)/std
-        print(X_scale)
+        X_scale = (X[:,col]-mean)/(std+1)
         for row in range(len(X)):
             if abs(X_scale[row]) > threshold:
-                print(1)
-                X[row,col] = np.NaN
+                X[row,col] = np.nan
 
     return X
 
+Z = [[0,1,2],[1,1,1],[3,2,3]]
+sklearn.preprocessing.scale(Z)
+Z
+
 # Make zscore feature outlier removal a transformer function
-zscore_outlier_removal = sklearn.preprocessing.FunctionTransformer(zscore_outlier_removal)
+zscore_outlier_removal = sklearn.preprocessing.FunctionTransformer(zscore_outlier_removal,
+                                                                   kw_args=dict(threshold=5))
+
+# Impute missing (outliers) via KNN
+KNN_impute = KNNImputer()
 
 # add feature polynomials up to degree d
 poly = sklearn.preprocessing.PolynomialFeatures(degree=2, interaction_only=False,
                                                 include_bias=False)
 
-KNN_impute = sklearn.impute.KNNImputer()
-
-KNN_impute.fit_transform(X)
 # demean and scale to unit variance
 scale = sklearn.preprocessing.StandardScaler()
 
 # Put all processing and feature engineering in a pipeline 
-processing = imblearn.pipeline.Pipeline([('outlier', zscore_outlier_removal), ('poly', poly),
-                                        ('scale', scale)], verbose=True)
-
+processing = imblearn.pipeline.Pipeline([('outlier', zscore_outlier_removal), ('impute', KNN_impute),
+                                         ('poly', poly), ('scale', scale)], verbose=True)
 
 ##############################################################################################################
 # Functions
@@ -166,26 +169,20 @@ log_reg_cv = sklearn.linear_model.LogisticRegressionCV(Cs=10, fit_intercept=True
 log_reg = sklearn.linear_model.LogisticRegression(fit_intercept=True, dual=False, C=0.3, l1_ratio=0.9,
                                                    penalty='elasticnet', solver='saga', tol=0.0001,
                                                    max_iter=10000, class_weight=None, n_jobs=1, verbose=0)
-# blab
-
 
 log = copy.deepcopy(processing)
 log.steps.append(['log_reg', log_reg])
-log.fit(X, y)
-log.score(X,y)
 
-params = {"classifier__max_depth": [3, None],
-              "classifier__max_features": [1, 3, 10],
-              "classifier__min_samples_split": [1, 3, 10],
-              "classifier__min_samples_leaf": [1, 3, 10],
-              # "bootstrap": [True, False],
-              "classifier__criterion": ["gini", "entropy"]}
+param_grid = {"outlier__kw_args": [dict(threshold=i) for i in [100, 7, 5, 3]],
+              "poly__degree": [1, 2],
+              "log_reg__C": [np.e**i for i in range(-4,5,1)],
+              "log_reg__l1_ratio": [0,0.2,0.5,0.9,0.99,1]}
 
-# cv = sklearn.model_selection.GridSearchCV(log_reg, param_grid, scoring='balanced_accuracy', n_jobs=-1,
-#                                           iid='deprecated', refit=True, cv=None, verbose=1)
-# cv = KFold(n_splits=4)
-# scores = cross_val_score(pipeline, X, y, cv = cv)
+cv = sklearn.model_selection.GridSearchCV(log, param_grid, scoring='balanced_accuracy', n_jobs=-1,
+                                                    refit=True, cv=k_fold_strat_oversamp(X, y, k=10),
+                                                    verbose=0)
 
+cv.fit(X,y)
 # log_reg_cv.fit(X,y)
 # log_reg_cv.scores_
 # log_reg_cv.l1_ratio_
