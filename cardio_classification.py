@@ -15,8 +15,10 @@ import imblearn
 import copy
 import seaborn as sns
 import sklearn
+import lightgbm as lgb
 from sklearn.inspection import permutation_importance
 from sklearn.impute import KNNImputer
+from sklearn.calibration import calibration_curve
 
 #############################################################################################################
 # Data
@@ -221,9 +223,10 @@ def print_cv(cv, X, y, model_name):
 
     return
 
+
 def plot_permutation_importance(estimator, X, y, save_as=None):
     """ Boxplot of feature permutation importance for a given estimator. """
-    result = permutation_importance(estimator, X, y, scoring='balanced_accuracy', n_repeats=50, n_jobs=10,
+    result = permutation_importance(estimator, X, y, scoring='balanced_accuracy', n_repeats=50, n_jobs=cores,
         random_state=seed)
     perm_sorted_idx = result.importances_mean.argsort()
 
@@ -343,11 +346,19 @@ random_forest = sklearn.ensemble.RandomForestClassifier(n_estimators=100, criter
     min_samples_split=2, min_samples_leaf=1, min_weight_fraction_leaf=0.0, max_features=10,
     bootstrap=True, oob_score=False, n_jobs=cores, random_state=seed, class_weight='balanced')
 
-random_forest_grid = {"n_estimators": [50],
-    "max_depth": [5],
-    "max_features": [.5]}
+tree_numbers = [20, 50, 100]
+tree_depths = [2, 3, 5, 7]
+max_feature_vals = [.2,.5,.7]
 
-random_forest_cv = sklearn.model_selection.GridSearchCV(random_forest, random_forest_grid,
+forest_pipe = sklearn.pipeline.Pipeline(
+    [('poly', poly), ('forest', random_forest)])
+
+random_forest_grid = {"poly__degree": [1,2],
+    "forest__n_estimators": tree_numbers,
+    "forest__max_depth": tree_depths,
+    "forest__max_features": max_feature_vals}
+
+random_forest_cv = sklearn.model_selection.GridSearchCV(forest_pipe, random_forest_grid,
     scoring='balanced_accuracy', n_jobs=cores, refit=True, verbose=True, return_train_score=True, cv=5)
 random_forest_cv.fit(X,y)
 
@@ -358,52 +369,36 @@ plot_learning(random_forest_cv.best_estimator_, X, y, save_as='svm_learning')
 plot_permutation_importance(random_forest_cv.best_estimator_, X, y, save_as='svm_importance')
 
 #############################################################################################################
-# AdaBoost
+# LightGB
 
-tree = sklearn.tree.DecisionTreeClassifier(max_depth=2, class_weight='balanced', random_state=seed)
-
-boost = sklearn.ensemble.AdaBoostClassifier(base_estimator=tree, n_estimators=1000, learning_rate=1.0,
-    random_state=seed, algorithm='SAMME.R')
-
-# Put all processing and feature engineering in a pipeline
-boost_pipe = imblearn.pipeline.Pipeline(
-    [('outlier', zscore_outlier_removal), ('impute', KNN_impute), ('poly', poly), ('boost', boost)])
-
-len(df[df.Status == -1]) / len(df)
+gbm = lgb.LGBMClassifier(max_depth=5, class_weight='balanced',
+                        learning_rate=1, n_estimators=500, random_state=seed, num_leaves=100)
 
 # values to try for cross-validation
-learning_rates = [0.1, 0.2, 0.5, 0.7, 0.8, 0.9, 1]
-n_iterations_vals = [200, 500, 1000, 1500, 2000]
-tree_depths = [1, 2, 3, 4, 5]
-poly_degrees = [1, 2, 3]
-zscore_threshold_vals = [100, 7, 5]
+learning_rates = [0.011]
+n_iterations_vals = [500]
+tree_depths = [9]
 
-# full parameter grid (takes too long, run one at a time instead)
-boost_grid = {"outlier__kw_args": [dict(threshold=i) for i in zscore_threshold_vals],
-    "poly__degree": poly_degrees, "boost__base_estimator__max_depth": tree_depths,
-    "boost__learning_rate": learning_rates, "boost__n_estimators": n_iterations_vals}
-
-# optimal values found through one at a time CV
-boost_grid = {"outlier__kw_args": [dict(threshold=i) for i in [100]], "poly__degree": [2],
-    "boost__base_estimator__max_depth": [2], "boost__learning_rate": [0.7], "boost__n_estimators": [1500]}
+gbm_grid = {"max_depth": tree_depths,
+            "learning_rate": learning_rates,
+            "n_estimators": n_iterations_vals}
 
 # stratified 5-fold cross-validation
-cv_boost = sklearn.model_selection.GridSearchCV(boost_pipe, boost_grid, scoring='balanced_accuracy',
+cv_boost = sklearn.model_selection.GridSearchCV(gbm, gbm_grid, scoring='balanced_accuracy',
     n_jobs=cores, refit=True, verbose=True, return_train_score=False, cv=5)
-cv_boost.fit(X, y)
+cv_boost.fit(X,y)
 
-# Results
 print_cv(cv_boost, X, y, 'AdaBoost')
 
-# plot_learning(cv_boost.best_estimator_, X, y, save_as='boost_learning')
+plot_learning(cv_boost.best_estimator_, X, y, save_as='AdaBoost')
 
-# plot_permutation_importance(cv_boost.best_estimator_, X, y, save_as='boost_importance')
+plot_permutation_importance(cv_boost.best_estimator_, X, y, save_as='AdaBoost')
 
 #############################################################################################################
 # Logistic regression
 
 log_reg = sklearn.linear_model.LogisticRegression(fit_intercept=True, dual=False, C=0.3, l1_ratio=0.9,
-    penalty='elasticnet', solver='saga', tol=0.001, max_iter=5000, class_weight='balanced', n_jobs=1)
+    penalty='elasticnet', solver='saga', tol=0.001, max_iter=5000, class_weight='balanced')
 
 # optimal pipeline without outlier treatment
 log = imblearn.pipeline.Pipeline([('poly', poly), ('scale', scale), ('log_reg', log_reg)])
@@ -429,14 +424,26 @@ stack_estimators = [('forest', random_forest_cv.best_estimator_), ('svm', svm_cv
 stack = sklearn.ensemble.StackingClassifier(stack_estimators, cv=5, stack_method='auto', n_jobs=cores, verbose=1)
 stack.fit(X,y)
 
-cross_val_pred = sklearn.model_selection.cross_val_predict(stack, X, y, cv=5, n_jobs=cores)
+models = [('forest', random_forest_cv.best_estimator_), ('svm', svm_cv.best_estimator_),
+    ('boost', cv_boost.best_estimator_)]
+voting = sklearn.ensemble.VotingClassifier(models, voting='hard')
+
+cross_val_pred = sklearn.model_selection.cross_val_predict(voting, X, y, cv=5, n_jobs=cores)
 print('Out-of-sample confusion matrix of best estimator:\n{}'.format(
     sklearn.metrics.confusion_matrix(y, cross_val_pred)))
 
 sklearn.metrics.balanced_accuracy_score(y,cross_val_pred)
 
-stack.get_params()
-
+cross_val_pred_prob = sklearn.model_selection.cross_val_predict(cv_boost.best_estimator_, X, y, cv=5,
+    n_jobs=cores, method='predict_proba')[:,1]
+fraction_of_positives, mean_predicted_value = calibration_curve(y, cross_val_pred_prob, normalize=False,
+    n_bins=7, strategy='uniform')
+name='Boost'
+clf_score = sklearn.metrics.brier_score_loss(y, cross_val_pred_prob, pos_label=y.max())
+plt.plot(mean_predicted_value, fraction_of_positives, "s-", label="%s (%1.3f)" % (name, clf_score))
+plt.plot([0, 1], [0, 1], "k:", label="Perfectly calibrated")
+plt.legend()
+plt.show()
 #############################################################################################################
 # Comparison
 
@@ -461,8 +468,52 @@ plt.show()
 
 
 
+
 #############################################################################################################
 # Unused
+
+
+#############################################################################################################
+# AdaBoost
+
+tree = sklearn.tree.DecisionTreeClassifier(max_depth=2, class_weight='balanced', random_state=seed)
+
+boost = sklearn.ensemble.AdaBoostClassifier(base_estimator=tree, n_estimators=1000, learning_rate=1.0,
+    random_state=seed, algorithm='SAMME.R')
+
+# Put all processing and feature engineering in a pipeline
+boost_pipe = sklearn.pipeline.Pipeline([('poly', poly), ('boost', boost)])
+
+# values to try for cross-validation
+learning_rates = [0.1, 0.2, 0.5, 0.7, 0.8, 0.9, 1]
+n_iterations_vals = [500, 1000, 1500, 2000]
+tree_depths = [1, 2, 3, 4, 5, 6]
+poly_degrees = [1, 2]
+
+# full parameter grid (takes too long, run one at a time instead)
+boost_grid = {"poly__degree": poly_degrees, "boost__base_estimator__max_depth": tree_depths,
+    "boost__learning_rate": learning_rates, "boost__n_estimators": [1000]}
+
+# optimal values found through one at a time CV
+boost_grid = {"poly__degree": [2], "boost__base_estimator__max_depth": [1],
+    "boost__learning_rate": [0.1], "boost__n_estimators": [1000]}
+
+# optimal values found through one at a time CV
+# boost_grid = {"outlier__kw_args": [dict(threshold=i) for i in [100]], "poly__degree": [2],
+#     "boost__base_estimator__max_depth": [2], "boost__learning_rate": [0.7], "boost__n_estimators": [1500]}
+
+# stratified 5-fold cross-validation
+cv_boost = sklearn.model_selection.GridSearchCV(boost_pipe, boost_grid, scoring='balanced_accuracy',
+    n_jobs=cores, refit=True, verbose=True, return_train_score=False, cv=5)
+cv_boost.fit(X, y)
+
+# Results
+print_cv(cv_boost, X, y, 'AdaBoost')
+
+# plot_learning(cv_boost.best_estimator_, X, y, save_as='boost_learning')
+
+# plot_permutation_importance(cv_boost.best_estimator_, X, y, save_as='boost_importance')
+
 
 # LOF observation outlier removal (not used in the end)
 def lof_outlier_removal(X, y, share_out=10 ** (-2)):
@@ -473,7 +524,7 @@ def lof_outlier_removal(X, y, share_out=10 ** (-2)):
         return X, y
 
     lof = sklearn.neighbors.LocalOutlierFactor(n_neighbors=50, algorithm='auto', leaf_size=30,
-        metric='minkowski', p=2, metric_params=None, contamination=share_out, novelty=False, n_jobs=None)
+        metric='minkowski', p=2, metric_params=None, contamination=share_out, novelty=False)
 
     inlier = lof.fit_predict(X)
 
